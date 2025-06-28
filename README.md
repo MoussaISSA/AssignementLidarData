@@ -83,4 +83,6 @@ You can change this to match your project requirements using any polygon support
 ## 👤 Author
 
 **Moussa ISSA**  
-Capstone project using LiDAR data for clearance envelope analysis.
+Master DT - Module Intellignet Transport Systems.
+Project :  using LiDAR data for clearance envelope analysis.
+
