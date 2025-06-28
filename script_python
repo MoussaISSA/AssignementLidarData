@@ -1,0 +1,125 @@
+# ======================================
+# 1. Import required libraries
+# ======================================
+from pye57 import E57
+import numpy as np
+import open3d as o3d
+import pandas as pd
+from shapely.geometry import Polygon, Point
+import os
+
+# ======================================
+# 2. Preprocessing: Load and unify coordinate system
+# ======================================
+print("📂 Loading E57 file...")
+e57_path = r"C:\Users\Moussa\Downloads\OneDrive_1_25-06-2025\Sample2\sample_2.e57"
+e57 = E57(e57_path)
+scan = e57.read_scan(0, ignore_missing_fields=True)
+
+points = np.vstack((
+    scan["cartesianX"],
+    scan["cartesianY"],
+    scan["cartesianZ"]
+)).T
+print(f"✅ {points.shape[0]} points imported.")
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(points)
+
+# ======================================
+# 3. PCA-based Cross-Section Extraction
+# ======================================
+def extract_perpendicular_section(pcd, thickness=0.9, position_along_axis=0.0):
+    pts = np.asarray(pcd.points)
+    mean_pts = pts.mean(axis=0)
+    centered_pts = pts - mean_pts
+
+    cov = np.cov(centered_pts.T)
+    eig_vals, eig_vecs = np.linalg.eigh(cov)
+    principal_axis = eig_vecs[:, np.argmax(eig_vals)]
+
+    distances = np.dot(centered_pts - position_along_axis * principal_axis, principal_axis)
+    mask = np.abs(distances) < thickness / 2
+    selected_pts = pts[mask]
+
+    section_pcd = o3d.geometry.PointCloud()
+    section_pcd.points = o3d.utility.Vector3dVector(selected_pts)
+
+    return section_pcd, selected_pts, principal_axis, mean_pts
+
+# Section settings
+thickness = 0.9
+position_along_axis = 0.0
+
+section, section_pts, axis_dir, center = extract_perpendicular_section(pcd, thickness, position_along_axis)
+print(f"📏 {section_pts.shape[0]} points extracted in the perpendicular section.")
+
+# ======================================
+# 4. Clearance Envelope Modeling (2D polygon in local frame)
+# ======================================
+# Replace this with your actual gabarit if needed
+clearance_polygon = Polygon([
+    (-3.0, -3.0),
+    (-3.0,  3.0),
+    ( 2.0,  3.0),
+    ( 2.0, -3.0)
+])
+
+# ======================================
+# 5. Collision Detection on full cloud
+# ======================================
+def build_local_frame(axis):
+    axis = axis / np.linalg.norm(axis)
+    arbitrary = np.array([1, 0, 0]) if abs(axis[0]) < 0.9 else np.array([0, 1, 0])
+    v = np.cross(axis, arbitrary)
+    v /= np.linalg.norm(v)
+    w = np.cross(axis, v)
+    return v, w
+
+v_axis, w_axis = build_local_frame(axis_dir)
+
+all_pts = np.asarray(pcd.points)
+violations = []
+for pt in all_pts:
+    vec = pt - center
+    x_local = np.dot(vec, v_axis)
+    y_local = np.dot(vec, w_axis)
+    pt_2d = Point(x_local, y_local)
+    if clearance_polygon.contains(pt_2d):
+        violations.append(pt)
+
+violations = np.array(violations)
+print(f"🚨 {len(violations)} violating points found in full point cloud.")
+
+# ======================================
+# 6. Export Results to CloudCompare format
+# ======================================
+output_dir = r"C:\Users\Moussa\Downloads\OneDrive_1_25-06-2025\Sample2\output"
+os.makedirs(output_dir, exist_ok=True)
+
+# Export section slice
+section_path = os.path.join(output_dir, "section_slice.txt")
+pd.DataFrame(section_pts, columns=["X", "Y", "Z"]).to_csv(section_path, sep=" ", index=False, header=False)
+print(f"📤 Section exported to: {section_path}")
+
+# Export violating points
+if len(violations) > 0:
+    df_viol = pd.DataFrame(violations, columns=["X", "Y", "Z"])
+    df_viol["R"] = 255
+    df_viol["G"] = 0
+    df_viol["B"] = 0
+    viol_path = os.path.join(output_dir, "violations_full.txt")
+    df_viol.to_csv(viol_path, sep=" ", index=False, header=False)
+    print(f"📤 Violations exported to: {viol_path}")
+else:
+    print("✅ No violations found.")
+
+# Export aligned clearance envelope (gabarit) in global coordinates
+gabarit_pts = []
+for x, y in clearance_polygon.exterior.coords:
+    pt_3d = center + x * v_axis + y * w_axis
+    gabarit_pts.append(pt_3d)
+
+gabarit_path = os.path.join(output_dir, "aligned_gabarit.txt")
+pd.DataFrame(gabarit_pts, columns=["X", "Y", "Z"]).to_csv(gabarit_path, sep=" ", index=False, header=False)
+print(f"📐 Gabarit exported to: {gabarit_path}")
